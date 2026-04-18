@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-prove:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache Alire tools
+        uses: actions/cache@v4
+        with:
+          path: .tools/alr
+          key: ${{ runner.os }}-alr-2.1.0
+
+      - name: Setup toolchain
+        run: make setup
+
+      - name: Build allocator
+        run: make build-allocator
+
+      - name: Run strict proof
+        run: PROFILE=strict scripts/prove_secure_pool.sh
+
+      - name: Generate proof badge JSON
+        run: python3 scripts/generate_proof_badge.py --input build/obj/gnatprove/gnatprove.out --output build/badges/proof-badge.json
+
+      - name: Check for proof assumptions
+        run: |
+          if grep -RIn --include='*.adb' --include='*.ads' --include='*.gpr' -E 'pragma[[:space:]]+(Assume|Trusted)' src config secure_allocator.gpr; then
+            echo "Found forbidden proof pragmas"
+            exit 1
+          fi
+
+      - name: Upload proof summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gnatprove-summary
+          path: build/obj/gnatprove/gnatprove.out
+
+      - name: Publish proof badge endpoint
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: build/badges
+          keep_files: true

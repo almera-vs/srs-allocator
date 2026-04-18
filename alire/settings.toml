@@ -1,0 +1,2 @@
+last_build_profile = "gnat_native=RELEASE,gnatprove=RELEASE,gprbuild=RELEASE,secure_redis_spark_allocator=DEVELOPMENT"
+

@@ -1,0 +1,11 @@
+build/
+vendor/
+.alire/
+.tools/
+*.o
+*.ali
+*.a
+*.so
+*.dylib
+*.dSYM/
+*.swp

@@ -1,0 +1,188 @@
+diff --git a/src/Makefile b/src/Makefile
+index cc84d09..64a5b35 100644
+--- a/src/Makefile
++++ b/src/Makefile
+@@ -101,6 +101,10 @@ ifeq ($(USE_JEMALLOC),no)
+ 	MALLOC=libc
+ endif
+ 
++ifeq ($(USE_SECURE_SPARK_ALLOCATOR),yes)
++	MALLOC=spark_secure
++endif
++
+ ifdef SANITIZER
+ ifeq ($(SANITIZER),address)
+ 	MALLOC=libc
+@@ -280,6 +284,14 @@ ifeq ($(MALLOC),jemalloc)
+ 	FINAL_LIBS := ../deps/jemalloc/lib/libjemalloc.a $(FINAL_LIBS)
+ endif
+ 
++ifeq ($(MALLOC),spark_secure)
++	FINAL_CFLAGS+= -DUSE_SECURE_SPARK_ALLOCATOR
++	SECURE_ALLOCATOR_LIB_DIR?=../build/lib
++	FINAL_LDFLAGS+= -L$(SECURE_ALLOCATOR_LIB_DIR) -Wl,-rpath,$(abspath $(SECURE_ALLOCATOR_LIB_DIR))
++	GNAT_RUNTIME_LIB_DIR?=
++	FINAL_LIBS := -lsecure_allocator -L$(GNAT_RUNTIME_LIB_DIR) -lgnarl -lgnat -lSystem $(FINAL_LIBS)
++endif
++
+ # LIBSSL & LIBCRYPTO
+ LIBSSL_LIBS=
+ LIBSSL_PKGCONFIG := $(shell $(PKG_CONFIG) --exists libssl && echo $$?)
+diff --git a/src/server.c b/src/server.c
+index 1a7bf27..6dc3161 100644
+--- a/src/server.c
++++ b/src/server.c
+@@ -97,7 +97,7 @@ void serverLogRaw(int level, const char *msg) {
+     FILE *fp;
+     char buf[64];
+     int rawmode = (level & LL_RAW);
+-    int log_to_stdout = server.logfile[0] == '\0';
++    int log_to_stdout = (server.logfile == NULL) || (server.logfile[0] == '\0');
+ 
+     level &= 0xff; /* clear flags */
+     if (level < server.verbosity) return;
+@@ -6967,6 +6967,7 @@ int main(int argc, char **argv) {
+     spt_init(argc, argv);
+ #endif
+     tzset(); /* Populates 'timezone' global. */
++    zmalloc_secure_allocator_init();
+     zmalloc_set_oom_handler(redisOutOfMemoryHandler);
+ 
+     /* To achieve entropy, in case of containers, their time() and getpid() can
+diff --git a/src/zmalloc.c b/src/zmalloc.c
+index e40c6ac..17bce90 100644
+--- a/src/zmalloc.c
++++ b/src/zmalloc.c
+@@ -65,6 +65,11 @@ void zlibc_free(void *ptr) {
+ #define mallocx(size,flags) je_mallocx(size,flags)
+ #define rallocx(ptr,size,flags) je_rallocx(ptr,size,flags)
+ #define dallocx(ptr,flags) je_dallocx(ptr,flags)
++#elif defined(USE_SECURE_SPARK_ALLOCATOR)
++#define malloc(size) secure_malloc(size)
++#define calloc(count,size) secure_calloc(count,size)
++#define realloc(ptr,size) secure_realloc(ptr,size)
++#define free(ptr) secure_free(ptr)
+ #endif
+ 
+ #define update_zmalloc_stat_alloc(__n) atomicIncr(used_memory,(__n))
+@@ -72,6 +77,29 @@ void zlibc_free(void *ptr) {
+ 
+ static redisAtomic size_t used_memory = 0;
+ 
++#if defined(USE_SECURE_SPARK_ALLOCATOR)
++static int secure_allocator_initialized = 0;
++#endif
++
++void zmalloc_secure_allocator_init(void) {
++#if defined(USE_SECURE_SPARK_ALLOCATOR)
++    void *(*volatile pool_base_sym)(void) = secure_pool_base;
++    size_t (*volatile pool_size_sym)(void) = secure_pool_size;
++    long long (*volatile find_pattern_sym)(const char *, size_t) = secure_pool_find_pattern;
++    (void)pool_base_sym;
++    (void)pool_size_sym;
++    (void)find_pattern_sym;
++    if (!secure_allocator_initialized) {
++        if (!secure_allocator_init()) {
++            fprintf(stderr, "zmalloc: secure allocator initialization failed\n");
++            fflush(stderr);
++            abort();
++        }
++        secure_allocator_initialized = 1;
++    }
++#endif
++}
++
+ static void zmalloc_default_oom(size_t size) {
+     fprintf(stderr, "zmalloc: Out of memory trying to allocate %zu bytes\n",
+         size);
+@@ -311,6 +339,19 @@ static inline void *ztryrealloc_usable_internal(void *ptr, size_t size, size_t *
+     }
+ 
+ #ifdef HAVE_MALLOC_SIZE
++#if defined(USE_SECURE_SPARK_ALLOCATOR)
++    oldsize = secure_usable_size(ptr);
++    newptr = realloc(ptr,size);
++    if (newptr == NULL) {
++        if (usable) *usable = 0;
++        return NULL;
++    }
++    update_zmalloc_stat_free(oldsize);
++    size = secure_usable_size(newptr);
++    update_zmalloc_stat_alloc(size);
++    if (usable) *usable = size;
++    return newptr;
++#else
+     oldsize = zmalloc_size(ptr);
+     newptr = realloc(ptr,size);
+     if (newptr == NULL) {
+@@ -323,6 +364,7 @@ static inline void *ztryrealloc_usable_internal(void *ptr, size_t size, size_t *
+     update_zmalloc_stat_alloc(size);
+     if (usable) *usable = size;
+     return newptr;
++#endif
+ #else
+     realptr = (char*)ptr-PREFIX_SIZE;
+     oldsize = *((size_t*)realptr);
+@@ -398,8 +440,13 @@ void zfree(void *ptr) {
+ 
+     if (ptr == NULL) return;
+ #ifdef HAVE_MALLOC_SIZE
++#if defined(USE_SECURE_SPARK_ALLOCATOR)
++    update_zmalloc_stat_free(secure_usable_size(ptr));
++    free(ptr);
++#else
+     update_zmalloc_stat_free(zmalloc_size(ptr));
+     free(ptr);
++#endif
+ #else
+     realptr = (char*)ptr-PREFIX_SIZE;
+     oldsize = *((size_t*)realptr);
+@@ -417,8 +464,13 @@ void zfree_usable(void *ptr, size_t *usable) {
+ 
+     if (ptr == NULL) return;
+ #ifdef HAVE_MALLOC_SIZE
++#if defined(USE_SECURE_SPARK_ALLOCATOR)
++    update_zmalloc_stat_free(*usable = secure_usable_size(ptr));
++    free(ptr);
++#else
+     update_zmalloc_stat_free(*usable = zmalloc_size(ptr));
+     free(ptr);
++#endif
+ #else
+     realptr = (char*)ptr-PREFIX_SIZE;
+     *usable = oldsize = *((size_t*)realptr);
+diff --git a/src/zmalloc.h b/src/zmalloc.h
+index e810020..c79afc8 100644
+--- a/src/zmalloc.h
++++ b/src/zmalloc.h
+@@ -34,6 +34,22 @@
+ #error "Newer version of jemalloc required"
+ #endif
+ 
++#elif defined(USE_SECURE_SPARK_ALLOCATOR)
++#define ZMALLOC_LIB "spark-secure-pool"
++#include <stddef.h>
++int secure_allocator_init(void);
++void *secure_malloc(size_t size);
++void *secure_calloc(size_t count, size_t size);
++void *secure_realloc(void *ptr, size_t size);
++void secure_free(void *ptr);
++size_t secure_usable_size(void *ptr);
++int secure_pointer_allocated(void *ptr);
++void *secure_pool_base(void);
++size_t secure_pool_size(void);
++long long secure_pool_find_pattern(const char *pattern, size_t len);
++#define HAVE_MALLOC_SIZE 1
++#define zmalloc_size(p) secure_usable_size(p)
++
+ #elif defined(__APPLE__)
+ #include <malloc/malloc.h>
+ #define HAVE_MALLOC_SIZE 1
+@@ -90,6 +106,7 @@ __attribute__((malloc,alloc_size(1),noinline)) void *ztrymalloc(size_t size);
+ __attribute__((malloc,alloc_size(1),noinline)) void *ztrycalloc(size_t size);
+ __attribute__((alloc_size(2),noinline)) void *ztryrealloc(void *ptr, size_t size);
+ void zfree(void *ptr);
++void zmalloc_secure_allocator_init(void);
+ void *zmalloc_usable(size_t size, size_t *usable);
+ void *zcalloc_usable(size_t size, size_t *usable);
+ void *zrealloc_usable(void *ptr, size_t size, size_t *usable);

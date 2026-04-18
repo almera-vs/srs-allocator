@@ -1,0 +1,20 @@
+project Secure_Allocator is
+   Sdk_Root := external ("SDKROOT", "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk");
+
+   for Languages use ("Ada");
+   for Source_Dirs use ("src/spark", "src/ffi", "src/runtime");
+   for Object_Dir use "build/obj";
+   for Library_Dir use "build/lib";
+   for Library_Name use "secure_allocator";
+   for Library_Kind use "static";
+   for Library_Interface use ("secure_alloc_c", "secure_allocator_runtime", "secure_pool");
+   for Library_Options use ("-Wl,-syslibroot," & Sdk_Root);
+
+   package Compiler is
+      for Default_Switches ("Ada") use ("-gnat2022", "-gnata", "-fPIC");
+   end Compiler;
+
+   package Prove is
+      for Proof_Switches ("Ada") use ("--mode=all", "--level=4", "--proof=progressive", "--checks-as-errors=on", "--warnings=on");
+   end Prove;
+end Secure_Allocator;

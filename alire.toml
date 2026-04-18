@@ -1,0 +1,16 @@
+name = "secure_redis_spark_allocator"
+description = "SPARK verified secure allocator for Redis 7.4.2"
+version = "0.1.0-dev"
+licenses = "Apache-2.0"
+maintainers = []
+tags = ["spark", "security", "redis", "allocator"]
+project-files = ["secure_allocator.gpr"]
+
+[[depends-on]]
+gnat_native = "=15.1.2"
+
+[[depends-on]]
+gnatprove = "=15.1.0"
+
+[[depends-on]]
+gprbuild = "=25.0.1"
